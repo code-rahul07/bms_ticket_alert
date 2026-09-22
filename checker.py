@@ -2,12 +2,16 @@ import json
 import os
 import re
 import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-URL = "https://in.bookmyshow.com/movies/hyderabad/the-paradise/buytickets/ET00518274/20260924?etCodes=*&language=telugu&refEventCode=ET00518274"
+URLS = {
+    "23 Sep": "https://in.bookmyshow.com/movies/hyderabad/the-paradise/buytickets/ET00518274/20260923?etCodes=*&language=telugu&refEventCode=ET00518274",
+    "24 Sep": "https://in.bookmyshow.com/movies/hyderabad/the-paradise/buytickets/ET00518274/20260924?etCodes=*&language=telugu&refEventCode=ET00518274",
+}
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT = os.environ["TELEGRAM_CHAT_ID"]
+BROWSERLESS_TOKEN = os.environ["BROWSERLESS_TOKEN"]
 
 def send(msg):
     response = requests.post(
@@ -29,23 +33,80 @@ def save(data):
     with open("last_seen.json", "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-response = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-response.raise_for_status()
-print("BookMyShow HTTP status:", response.status_code)
+def extract_times(text, date_label):
+    # Keep only clock-looking values. The selected BookMyShow date page
+    # is used as the source, and duplicate times are removed.
+    found = []
+    seen = set()
 
-soup = BeautifulSoup(response.text, "html.parser")
-page_text = soup.get_text(" ", strip=True)
+    for raw_time, meridiem in re.findall(
+        r"\b([0-9]{1,2}:[0-9]{2})\s*(AM|PM)\b", text, re.I
+    ):
+        hour, minute = map(int, raw_time.split(":"))
+        meridiem = meridiem.upper()
 
-# The page URL supplied by the user is for 24 Sep.
-# Detect only early-morning shows strictly before 08:00 AM.
+        if not (1 <= hour <= 12 and 0 <= minute <= 59):
+            continue
+
+        if date_label == "24 Sep":
+            if meridiem != "AM" or hour >= 8:
+                continue
+
+        normalized = f"{hour:02d}:{minute:02d} {meridiem}"
+        if normalized not in seen:
+            seen.add(normalized)
+            found.append(normalized)
+
+    return found
+
+def get_page_text(browser, url):
+    page = browser.new_page(viewport={"width": 1440, "height": 1200})
+    try:
+        print("Opening:", url)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+        # Allow the client-rendered show listings to settle.
+        page.wait_for_timeout(6000)
+
+        title = page.title()
+        print("Page title:", title)
+
+        text = page.locator("body").inner_text(timeout=30000)
+        print("Page text length:", len(text))
+
+        if len(text.strip()) < 200:
+            raise RuntimeError("BookMyShow page returned unexpectedly little visible content.")
+
+        return text
+    finally:
+        page.close()
+
 matches = []
-for t in re.findall(r"\b([0-9]{1,2}:[0-9]{2})\s*(AM|PM)\b", page_text, re.I):
-    hour, minute = map(int, t[0].split(":"))
-    meridiem = t[1].upper()
-    if meridiem == "AM" and (hour < 8):
-        matches.append(("24 Sep", f"{hour:02d}:{minute:02d} AM"))
 
-print("Matching shows detected:", matches)
+with sync_playwright() as p:
+    ws_endpoint = (
+        "wss://production-sfo.browserless.io/chromium/playwright"
+        f"?token={BROWSERLESS_TOKEN}"
+    )
+
+    browser = p.chromium.connect(ws_endpoint)
+    try:
+        for date_label, url in URLS.items():
+            try:
+                text = get_page_text(browser, url)
+                times = extract_times(text, date_label)
+                print(f"{date_label} matching times:", times)
+
+                for time in times:
+                    matches.append((date_label, time))
+            except PlaywrightTimeoutError as exc:
+                print(f"Timeout while checking {date_label}: {exc}")
+            except Exception as exc:
+                print(f"Error while checking {date_label}: {exc}")
+    finally:
+        browser.close()
+
+print("All matching shows detected:", matches)
 
 state = load()
 seen = set(state.get("shows", []))
@@ -63,7 +124,8 @@ if new:
     msg = "🎟 The Paradise Ticket Alert\n\n"
     for date, time in new:
         msg += f"{date} • {time}\n"
-    msg += "\nOpen BookMyShow:\n" + URL
+
+    msg += "\nBookMyShow:\n" + URLS["24 Sep"]
     send(msg)
     print("Sent alert for:", new)
 else:
