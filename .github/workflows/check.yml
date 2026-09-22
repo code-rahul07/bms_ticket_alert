@@ -34,7 +34,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -e
-          RESPONSE=$(curl -sS -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage"             -H "Content-Type: application/json"             --data "{"chat_id":"$TELEGRAM_CHAT_ID","text":"✅ The Paradise monitor Telegram test is working."}")
+          RESPONSE=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}"             --data-urlencode "text=The Paradise monitor Telegram test is working.")
           echo "$RESPONSE"
           echo "$RESPONSE" | grep -q '"ok":true'
 
