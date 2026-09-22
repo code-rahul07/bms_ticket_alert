@@ -1,75 +1,72 @@
-
 import json
 import os
+import re
 import requests
 from bs4 import BeautifulSoup
 
-URL="https://in.bookmyshow.com/movies/hyderabad/the-paradise/buytickets/ET00518274/20260924?etCodes=*&language=telugu&refEventCode=ET00518274"
+URL = "https://in.bookmyshow.com/movies/hyderabad/the-paradise/buytickets/ET00518274/20260924?etCodes=*&language=telugu&refEventCode=ET00518274"
 
-TOKEN=os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT=os.environ["TELEGRAM_CHAT_ID"]
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT = os.environ["TELEGRAM_CHAT_ID"]
 
 def send(msg):
-    requests.post(
+    response = requests.post(
         f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        json={"chat_id":CHAT,"text":msg}
+        json={"chat_id": CHAT, "text": msg},
+        timeout=20,
     )
+    print("Telegram response:", response.text)
+    response.raise_for_status()
+    data = response.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram API error: {data}")
 
 def load():
-    with open("last_seen.json") as f:
+    with open("last_seen.json", encoding="utf-8") as f:
         return json.load(f)
 
 def save(data):
-    with open("last_seen.json","w") as f:
-        json.dump(data,f)
+    with open("last_seen.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
-html=requests.get(URL,headers={"User-Agent":"Mozilla/5.0"}).text
-soup=BeautifulSoup(html,"html.parser")
+response = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+response.raise_for_status()
+print("BookMyShow HTTP status:", response.status_code)
 
-text=soup.get_text(" ",strip=True)
+soup = BeautifulSoup(response.text, "html.parser")
+page_text = soup.get_text(" ", strip=True)
 
-matches=[]
+# The page URL supplied by the user is for 24 Sep.
+# Detect only early-morning shows strictly before 08:00 AM.
+matches = []
+for t in re.findall(r"\b([0-9]{1,2}:[0-9]{2})\s*(AM|PM)\b", page_text, re.I):
+    hour, minute = map(int, t[0].split(":"))
+    meridiem = t[1].upper()
+    if meridiem == "AM" and (hour < 8):
+        matches.append(("24 Sep", f"{hour:02d}:{minute:02d} AM"))
 
-# very simple parser
-# if BookMyShow changes layout this is easy to update.
+print("Matching shows detected:", matches)
 
-import re
+state = load()
+seen = set(state.get("shows", []))
+new = []
 
-times=re.findall(r"([0-9]{1,2}:[0-9]{2}\s?(?:AM|PM))",text,re.I)
+for date, time in matches:
+    key = f"{date}-{time}"
+    if key not in seen:
+        seen.add(key)
+        new.append((date, time))
 
-for t in times:
-    x=t.upper().replace(" ","")
-
-    if "AM" in x:
-        hour=int(x.split(":")[0])
-
-        # before 8 AM
-        if hour<8:
-            matches.append(("24 Sep",t))
-
-# 23 Sept page text
-if "23 Sep" in text or "23 September" in text:
-    matches.append(("23 Sep","Available"))
-
-state=load()
-
-new=[]
-
-for m in matches:
-    key=f"{m[0]}-{m[1]}"
-    if key not in state["shows"]:
-        state["shows"].append(key)
-        new.append(m)
+state["shows"] = sorted(seen)
 
 if new:
-
-    msg="🎟 Paradise Ticket Alert\n\n"
-
-    for d,t in new:
-        msg+=f"{d} • {t}\n"
-
-    msg+="\nOpen BookMyShow now."
-
+    msg = "🎟 The Paradise Ticket Alert\n\n"
+    for date, time in new:
+        msg += f"{date} • {time}\n"
+    msg += "\nOpen BookMyShow:\n" + URL
     send(msg)
+    print("Sent alert for:", new)
+else:
+    print("No new matching show. No Telegram alert sent.")
 
 save(state)
